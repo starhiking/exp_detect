@@ -5,6 +5,9 @@ from sklearn.metrics import confusion_matrix, plot_confusion_matrix
 warnings.filterwarnings("ignore")
 import torch.utils.data as data
 import os
+import json
+from tqdm import tqdm
+from PIL import Image, ImageOps
 import argparse
 from sklearn.metrics import f1_score, confusion_matrix
 from data_preprocessing.sam import SAM
@@ -27,9 +30,13 @@ now = datetime.datetime.now()
 time_str = now.strftime("[%m-%d]-[%H-%M]-")
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data', type=str, default=r'/home/Dataset/RAF')
+parser.add_argument('--data_json', type=str, default='/home/jianghanyu/code/insightface/detection/scrfd/face_detect_json_anno/faceCaption5M_anno_json/faceCaption5M_refine_216k_split/0.json')
+parser.add_argument('--data', type=str, default='/mnt/data/lanxing/faceCaption5M/images/images')
+parser.add_argument('--gpu', type=str, default='0')
 parser.add_argument('--data_type', default='RAF-DB', choices=['RAF-DB', 'AffectNet-7', 'CAER-S'],
                         type=str, help='dataset option')
+parser.add_argument('-e', '--evaluate', default=None, type=str, help='evaluate model on test set')
+
 parser.add_argument('--checkpoint_path', type=str, default='./checkpoint/' + time_str + 'model.pth')
 parser.add_argument('--best_checkpoint_path', type=str, default='./checkpoint/' + time_str + 'model_best.pth')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N', help='number of data loading workers')
@@ -43,9 +50,7 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M')
 parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float, metavar='W', dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=30, type=int, metavar='N', help='print frequency')
 parser.add_argument('--resume', default=None, type=str, metavar='PATH', help='path to checkpoint')
-parser.add_argument('-e', '--evaluate', default=None, type=str, help='evaluate model on test set')
 parser.add_argument('--beta', type=float, default=0.6)
-parser.add_argument('--gpu', type=str, default='0')
 args = parser.parse_args()
 
 
@@ -132,19 +137,19 @@ def main():
                                                        num_workers=args.workers,
                                                        pin_memory=True)
 
-    test_dataset = datasets.ImageFolder(valdir,
-                                        transforms.Compose([transforms.Resize((224, 224)),
-                                                            transforms.ToTensor(),
-                                                            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                                                 std=[0.229, 0.224, 0.225]),
-                                                            ]))
+    # test_dataset = datasets.ImageFolder(valdir,
+    #                                     transforms.Compose([transforms.Resize((224, 224)),
+    #                                                         transforms.ToTensor(),
+    #                                                         transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                                                              std=[0.229, 0.224, 0.225]),
+    #                                                         ]))
 
 
-    val_loader = torch.utils.data.DataLoader(test_dataset,
-                                             batch_size=args.batch_size,
-                                             shuffle=False,
-                                             num_workers=args.workers,
-                                             pin_memory=True)
+    # val_loader = torch.utils.data.DataLoader(test_dataset,
+    #                                          batch_size=args.batch_size,
+    #                                          shuffle=False,
+    #                                          num_workers=args.workers,
+    #                                          pin_memory=True)
 
     if args.evaluate is not None:
         if os.path.isfile(args.evaluate):
@@ -157,7 +162,9 @@ def main():
             print("=> loaded checkpoint '{}' (epoch {})".format(args.evaluate, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.evaluate))
-        validate(val_loader, model, criterion, args)
+        inference(args.data, args.data_json, model)
+        # validate(val_loader, model, criterion, args)
+               
         return
 
     matrix = None
@@ -259,6 +266,91 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     return top1.avg, losses.avg
 
+
+def padding_crop_img(img, box):
+    # Note: img is pil image
+    h_origin, w_origin = img.height, img.width
+    box = [float(i) for i in box]
+    x1,y1,w,h = box
+    x2 = x1 + w
+    y2 = y1 + h
+    center = ((x1 + x2) / 2, (y1 + y2) / 2)
+    center_x, center_y = center
+    length = max(w, h)
+    square_x1 = int(center_x - length / 2)
+    square_y1 = int(center_y - length / 2)
+    square_x2 = int(center_x + length / 2)
+    square_y2 = int(center_y + length / 2)
+    #防止越界, 看情况做不做padding
+    top_pad = max(0, -square_y1)
+    left_pad = max(0, -square_x1)
+    bottom_pad = max(0, square_y2 - h_origin)
+    right_pad = max(0, square_x2 - w_origin)
+    #更新正方形顶点           
+    square_x1 = max(0, square_x1)
+    square_y1 = max(0, square_y1)
+    square_x2 = min(w_origin, square_x2)
+    square_y2 = min(h_origin, square_y2)
+    
+    cropped_img = img.crop((square_x1, square_y1, square_x2, square_y2))
+    
+    # padding RAF-DB 的测试集没做 padding，保持 (已测试：不做效果好) # TODO 根据情况改变
+    # cropped_img = ImageOps.expand(cropped_img, border=(left_pad, top_pad, right_pad, bottom_pad), fill='black')
+    
+    # if True:
+    #     # save vis samples
+    #     id_len = len(os.listdir('vis_samples'))
+    #     cropped_img.save(f'vis_samples/{id_len}.jpg')
+    return cropped_img
+    
+
+def inference(data_root, json_path, model):
+    model.eval()
+    exp_list = ["Surprise", "Fear", "Disgust", "Happiness", "Sadness", "Anger", "Neutral"]
+    val_transform = transforms.Compose([transforms.Resize((224, 224)),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                             std=[0.229, 0.224, 0.225]),
+                                        ])
+    json_data = json.load(open(json_path, "r"))
+    os.makedirs("exp_conf_jsons", exist_ok=True)
+    new_json_path = os.path.join("exp_conf_jsons",  os.path.basename(json_path.replace(".json", "_exp_conf.json")))
+    new_json_data = []
+    
+    for json_i in tqdm(json_data):
+        # preprocess data
+        img_path = os.path.join(data_root, json_i["path"])
+        img = Image.open(img_path).convert('RGB')
+        face_detect_res = json_i["result"]
+        face_num = len(face_detect_res)
+        imgs = []
+        with torch.no_grad():
+            # pre batch data
+            for face_j in face_detect_res:
+                box = face_j["facial_area"].copy()
+                cropped_img = padding_crop_img(img, box)
+                cropped_img = val_transform(cropped_img).cuda()
+                imgs.append(cropped_img)
+            imgs = torch.stack(imgs)
+            
+            output = model(imgs)
+                        
+            # _, pred_2 = output.topk(1, 1, True, True)
+            # assert pred.shape[0] == face_num
+            # assert pred.shape[1] == 1
+            # pred_exp = [exp_list[i] for i in pred]
+            
+            prob = torch.nn.functional.softmax(output, dim=1)
+            conf, pred = prob.topk(1, 1, True, True)
+            assert pred.shape[0] == face_num
+            assert pred.shape[1] == 1
+            pred_exp = [exp_list[i] for i in pred]
+        
+        for face_j, pred_exp_j,conf_j in zip(face_detect_res, pred_exp, conf):
+            conf_j = round(conf_j.cpu().item()+1e-6, 3)
+            face_j["exp"] = [pred_exp_j, conf_j]
+        new_json_data.append(json_i)
+    json.dump(new_json_data, open(new_json_path, "w"), indent=4)
 
 def validate(val_loader, model, criterion, args):
     losses = AverageMeter('Loss', ':.4f')
