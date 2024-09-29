@@ -1,3 +1,6 @@
+# 支持 inference 
+基于scrfd的结果，先保存成了json，然后再进行inference
+`python main_inference.py --data path/to/dataset_img --data_json faceCaption5M_refine_216k_split/{exp_id}.json --gpu {cuda_id} --evaluate /home/huguohong/raf-db-model_best.pth`
 # POSTER V2: A simpler and stronger facial expression recognition network 
 
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/poster-v2-a-simpler-and-stronger-facial/facial-expression-recognition-on-affectnet)](https://paperswithcode.com/sota/facial-expression-recognition-on-affectnet?p=poster-v2-a-simpler-and-stronger-facial)
