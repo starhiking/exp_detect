@@ -1,0 +1,9 @@
+RAF-DB/
+*.pyc
+*-log.txt
+*.pth
+*.pth.tar
+vis_samples/
+exp_jsons/
+exp_conf_jsons/
+faceCaption5M_refine_216k*
